@@ -1,7 +1,12 @@
 import { type NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
 import { getSession } from '@/lib/auth'
-import { env } from '@/lib/env'
-import { SIM_AGENT_API_URL_DEFAULT } from '@/lib/sim-agent/constants'
+import { SIM_AGENT_API_URL } from '@/lib/copilot/constants'
+import { env } from '@/lib/core/config/env'
+
+const GenerateApiKeySchema = z.object({
+  name: z.string().min(1, 'Name is required').max(255, 'Name is too long'),
+})
 
 export async function POST(req: NextRequest) {
   try {
@@ -12,10 +17,20 @@ export async function POST(req: NextRequest) {
 
     const userId = session.user.id
 
-    // Move environment variable access inside the function
-    const SIM_AGENT_API_URL = env.SIM_AGENT_API_URL || SIM_AGENT_API_URL_DEFAULT
+    const body = await req.json().catch(() => ({}))
+    const validationResult = GenerateApiKeySchema.safeParse(body)
 
-    await req.json().catch(() => ({}))
+    if (!validationResult.success) {
+      return NextResponse.json(
+        {
+          error: 'Invalid request body',
+          details: validationResult.error.errors,
+        },
+        { status: 400 }
+      )
+    }
+
+    const { name } = validationResult.data
 
     const res = await fetch(`${SIM_AGENT_API_URL}/api/validate-key/generate`, {
       method: 'POST',
@@ -23,7 +38,7 @@ export async function POST(req: NextRequest) {
         'Content-Type': 'application/json',
         ...(env.COPILOT_API_KEY ? { 'x-api-key': env.COPILOT_API_KEY } : {}),
       },
-      body: JSON.stringify({ userId }),
+      body: JSON.stringify({ userId, name }),
     })
 
     if (!res.ok) {

@@ -1,16 +1,17 @@
 'use client'
 
 import { useEffect } from 'react'
+import { createLogger } from '@sim/logger'
 import { useRouter } from 'next/navigation'
-import { LoadingAgent } from '@/components/ui/loading-agent'
-import { useSession } from '@/lib/auth-client'
-import { createLogger } from '@/lib/logs/console/logger'
+import { useSession } from '@/lib/auth/auth-client'
+import { useReferralAttribution } from '@/hooks/use-referral-attribution'
 
 const logger = createLogger('WorkspacePage')
 
 export default function WorkspacePage() {
   const router = useRouter()
   const { data: session, isPending } = useSession()
+  useReferralAttribution()
 
   useEffect(() => {
     const redirectToFirstWorkspace = async () => {
@@ -118,9 +119,16 @@ export default function WorkspacePage() {
   if (isPending) {
     return (
       <div className='flex h-screen w-full items-center justify-center'>
-        <div className='flex flex-col items-center justify-center text-center align-middle'>
-          <LoadingAgent size='lg' />
-        </div>
+        <div
+          className='h-[18px] w-[18px] animate-spin rounded-full'
+          style={{
+            background:
+              'conic-gradient(from 0deg, hsl(var(--muted-foreground)) 0deg 120deg, transparent 120deg 180deg, hsl(var(--muted-foreground)) 180deg 300deg, transparent 300deg 360deg)',
+            mask: 'radial-gradient(farthest-side, transparent calc(100% - 1.5px), black calc(100% - 1.5px))',
+            WebkitMask:
+              'radial-gradient(farthest-side, transparent calc(100% - 1.5px), black calc(100% - 1.5px))',
+          }}
+        />
       </div>
     )
   }

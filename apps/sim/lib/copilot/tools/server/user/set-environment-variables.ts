@@ -1,11 +1,10 @@
 import { db } from '@sim/db'
 import { environment } from '@sim/db/schema'
+import { createLogger } from '@sim/logger'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
-import { createPermissionError, verifyWorkflowAccess } from '@/lib/copilot/auth/permissions'
 import type { BaseServerTool } from '@/lib/copilot/tools/server/base-tool'
-import { createLogger } from '@/lib/logs/console/logger'
-import { decryptSecret, encryptSecret } from '@/lib/utils'
+import { decryptSecret, encryptSecret } from '@/lib/core/security/encryption'
 
 interface SetEnvironmentVariablesParams {
   variables: Record<string, any> | Array<{ name: string; value: string }>
@@ -50,30 +49,16 @@ export const setEnvironmentVariablesServerTool: BaseServerTool<SetEnvironmentVar
       }
 
       const authenticatedUserId = context.userId
-      const { variables, workflowId } = params || ({} as SetEnvironmentVariablesParams)
-
-      if (workflowId) {
-        const { hasAccess } = await verifyWorkflowAccess(authenticatedUserId, workflowId)
-
-        if (!hasAccess) {
-          const errorMessage = createPermissionError('modify environment variables in')
-          logger.error('Unauthorized attempt to set environment variables', {
-            workflowId,
-            authenticatedUserId,
-          })
-          throw new Error(errorMessage)
-        }
-      }
-
-      const userId = authenticatedUserId
+      const { variables } = params || ({} as SetEnvironmentVariablesParams)
 
       const normalized = normalizeVariables(variables || {})
       const { variables: validatedVariables } = EnvVarSchema.parse({ variables: normalized })
 
+      // Fetch existing personal environment variables
       const existingData = await db
         .select()
         .from(environment)
-        .where(eq(environment.userId, userId))
+        .where(eq(environment.userId, authenticatedUserId))
         .limit(1)
       const existingEncrypted = (existingData[0]?.variables as Record<string, string>) || {}
 
@@ -109,11 +94,12 @@ export const setEnvironmentVariablesServerTool: BaseServerTool<SetEnvironmentVar
 
       const finalEncrypted = { ...existingEncrypted, ...newlyEncrypted }
 
+      // Save to personal environment variables (keyed by userId)
       await db
         .insert(environment)
         .values({
           id: crypto.randomUUID(),
-          userId,
+          userId: authenticatedUserId,
           variables: finalEncrypted,
           updatedAt: new Date(),
         })
@@ -122,8 +108,15 @@ export const setEnvironmentVariablesServerTool: BaseServerTool<SetEnvironmentVar
           set: { variables: finalEncrypted, updatedAt: new Date() },
         })
 
+      logger.info('Saved personal environment variables', {
+        userId: authenticatedUserId,
+        addedCount: added.length,
+        updatedCount: updated.length,
+        totalCount: Object.keys(finalEncrypted).length,
+      })
+
       return {
-        message: `Successfully processed ${Object.keys(validatedVariables).length} environment variable(s): ${added.length} added, ${updated.length} updated`,
+        message: `Successfully processed ${Object.keys(validatedVariables).length} personal environment variable(s): ${added.length} added, ${updated.length} updated`,
         variableCount: Object.keys(validatedVariables).length,
         variableNames: Object.keys(validatedVariables),
         totalVariableCount: Object.keys(finalEncrypted).length,

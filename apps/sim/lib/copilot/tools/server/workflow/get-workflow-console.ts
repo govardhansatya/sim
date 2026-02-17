@@ -1,8 +1,11 @@
 import { db } from '@sim/db'
 import { workflowExecutionLogs } from '@sim/db/schema'
+import { createLogger } from '@sim/logger'
 import { desc, eq } from 'drizzle-orm'
 import type { BaseServerTool } from '@/lib/copilot/tools/server/base-tool'
-import { createLogger } from '@/lib/logs/console/logger'
+import { authorizeWorkflowByWorkspacePermission } from '@/lib/workflows/utils'
+
+const logger = createLogger('GetWorkflowConsoleServerTool')
 
 interface GetWorkflowConsoleArgs {
   workflowId: string
@@ -27,7 +30,7 @@ interface BlockExecution {
     input: number
     output: number
     model?: string
-    tokens?: { total: number; prompt: number; completion: number }
+    tokens?: { total: number; input: number; output: number }
   }
 }
 
@@ -87,11 +90,16 @@ function normalizeErrorMessage(errorValue: unknown): string | undefined {
   if (typeof errorValue === 'object') {
     try {
       return JSON.stringify(errorValue)
-    } catch {}
+    } catch (error) {
+      logger.warn('Failed to stringify error value', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
   try {
     return String(errorValue)
   } catch {
+    // JSON.stringify failed for error value; fall back to undefined
     return undefined
   }
 }
@@ -216,16 +224,27 @@ function deriveExecutionErrorSummary(params: {
 
 export const getWorkflowConsoleServerTool: BaseServerTool<GetWorkflowConsoleArgs, any> = {
   name: 'get_workflow_console',
-  async execute(rawArgs: GetWorkflowConsoleArgs): Promise<any> {
-    const logger = createLogger('GetWorkflowConsoleServerTool')
+  async execute(rawArgs: GetWorkflowConsoleArgs, context?: { userId: string }): Promise<any> {
     const {
       workflowId,
-      limit = 3,
-      includeDetails = true,
+      limit = 2,
+      includeDetails = false,
     } = rawArgs || ({} as GetWorkflowConsoleArgs)
 
     if (!workflowId || typeof workflowId !== 'string') {
       throw new Error('workflowId is required')
+    }
+    if (!context?.userId) {
+      throw new Error('Unauthorized workflow access')
+    }
+
+    const authorization = await authorizeWorkflowByWorkspacePermission({
+      workflowId,
+      userId: context.userId,
+      action: 'read',
+    })
+    if (!authorization.allowed) {
+      throw new Error(authorization.message || 'Unauthorized workflow access')
     }
 
     logger.info('Fetching workflow console logs', { workflowId, limit, includeDetails })
@@ -247,61 +266,36 @@ export const getWorkflowConsoleServerTool: BaseServerTool<GetWorkflowConsoleArgs
       .orderBy(desc(workflowExecutionLogs.startedAt))
       .limit(limit)
 
-    const formattedEntries: ExecutionEntry[] = executionLogs.map((log) => {
+    // Simplify data for copilot - only essential block execution details
+    const simplifiedExecutions = executionLogs.map((log) => {
       const executionData = log.executionData as any
       const traceSpans = executionData?.traceSpans || []
       const blockExecutions = includeDetails ? extractBlockExecutionsFromTraceSpans(traceSpans) : []
 
-      let finalOutput: any
-      if (blockExecutions.length > 0) {
-        const sortedBlocks = [...blockExecutions].sort(
-          (a, b) => new Date(b.endedAt).getTime() - new Date(a.endedAt).getTime()
-        )
-        const outputBlock = sortedBlocks.find(
-          (block) =>
-            block.status === 'success' &&
-            block.outputData &&
-            Object.keys(block.outputData).length > 0
-        )
-        if (outputBlock) finalOutput = outputBlock.outputData
-      }
-
-      const { message: errorMessage, block: errorBlock } = deriveExecutionErrorSummary({
-        blockExecutions,
-        traceSpans,
-        executionData,
-      })
+      // Simplify block executions to only essential fields
+      const simplifiedBlocks = blockExecutions.map((block) => ({
+        id: block.blockId,
+        name: block.blockName,
+        startedAt: block.startedAt,
+        endedAt: block.endedAt,
+        durationMs: block.durationMs,
+        output: block.outputData,
+        error: block.status === 'error' ? block.errorMessage : undefined,
+      }))
 
       return {
-        id: log.id,
         executionId: log.executionId,
-        level: log.level,
-        trigger: log.trigger,
         startedAt: log.startedAt.toISOString(),
-        endedAt: log.endedAt?.toISOString() || null,
-        durationMs: log.totalDurationMs,
-        totalCost: (log.cost as any)?.total ?? null,
-        totalTokens: (log.cost as any)?.tokens?.total ?? null,
-        blockExecutions,
-        output: finalOutput,
-        errorMessage: errorMessage,
-        errorBlock: errorBlock,
+        blocks: simplifiedBlocks,
       }
     })
 
-    const resultSize = JSON.stringify(formattedEntries).length
+    const resultSize = JSON.stringify(simplifiedExecutions).length
     logger.info('Workflow console result prepared', {
-      entryCount: formattedEntries.length,
+      executionCount: simplifiedExecutions.length,
       resultSizeKB: Math.round(resultSize / 1024),
-      hasBlockDetails: includeDetails,
     })
 
-    return {
-      entries: formattedEntries,
-      totalEntries: formattedEntries.length,
-      workflowId,
-      retrievedAt: new Date().toISOString(),
-      hasBlockDetails: includeDetails,
-    }
+    return simplifiedExecutions
   },
 }
